@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Poker Win Chance Calculator</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; }
+    label { display: block; margin-top: 1rem; }
+    input, button { padding: 0.5rem; font-size: 1rem; }
+    #results { margin-top: 1.5rem; font-weight: bold; }
+    #errors { margin-top: 1.5rem; color: red; }
+  </style>
+</head>
+<body>
+  <h1>Poker Win Chance Calculator</h1>
+
+  <form id="poker-form">
+    <label>
+      Number of players:
+      <input type="number" id="num-players" name="num-players" min="2" max="10" value="2" required>
+    </label>
+
+    <label>
+      Your cards (e.g. "AS KD" is Ace of Spades and King of Diamonds):
+      <input type="text" id="my-cards" name="my-cards" placeholder="AS KD" required>
+    </label>
+
+    <label>
+      Other known cards (board and/or opponent cards, e.g. "JH 9C" is Jack of Hearts, Nine of Clubs):
+      <input type="text" id="other-cards" name="other-cards" placeholder="optional">
+    </label>
+
+    <button type="submit">Estimate win chance</button>
+  </form>
+
+  <div id="errors"></div>
+  <div id="results"></div>
+
+  <script>
+    // ===== Constants and mappings (equivalent to Python dicts) =====
+    const numToCard = {
+      0: '2', 1: '3', 2: '4', 3: '5', 4: '6',
+      5: '7', 6: '8', 7: '9', 8: '10', 9: 'J',
+      10: 'Q', 11: 'K', 12: 'A'
+    };
+
+    const cardToNum = {};
+    for (const k in numToCard) {
+      cardToNum[numToCard[k]] = parseInt(k, 10);
+    }
+
+    const letterToSuite = { 'S': 0, 'H': 1, 'D': 2, 'C': 3 };
+    const suiteToCard = { 0: '♠', 1: '♥', 2: '♦', 3: '♣' };
+
+    // ===== Converters =====
+    function intToCard(n) {
+      const suite = Math.floor(n / 13);
+      const num = n % 13;
+      return numToCard[num] + suiteToCard[suite];
+    }
+
+    function intsToCards(ns) {
+      return ns.map(intToCard).join(' ');
+    }
+
+    function cardToInt(c) {
+      const trimmed = c.trim().toUpperCase();
+      if (!trimmed) throw new Error('Empty card');
+      const valuePart = trimmed.slice(0, -1);
+      const suitePart = trimmed.slice(-1);
+      if (!(suitePart in letterToSuite)) throw new Error('Bad suit: ' + c);
+      if (!(valuePart in cardToNum)) throw new Error('Bad rank: ' + c);
+      return letterToSuite[suitePart] * 13 + cardToNum[valuePart];
+    }
+
+    // ===== Combinations =====
+    function createCombos(allowed, length) {
+      const allCombos = [];
+      const indices = [];
+      for (let n = 0; n < length; n++) indices.push(n);
+      allCombos.push(indices.map(i => allowed[i]));
+
+      while (indices[0] < allowed.length - length) {
+        for (let i = length - 1; i >= 0; i--) {
+          if (indices[i] < allowed.length - length + i) {
+            indices[i] += 1;
+            for (let j = i + 1; j < length; j++) {
+              indices[j] = indices[i] + (j - i);
+            }
+            break;
+          }
+        }
+        allCombos.push(indices.map(i => allowed[i]));
+      }
+      return allCombos;
+    }
+
+    // ===== Hand evaluation =====
+    function pointsForCards(combo) {
+      const nums = [];
+      const suites = [];
+      for (const c of combo) {
+        nums.push(c % 13);
+        suites.push(Math.floor(c / 13));
+      }
+
+      // Flush
+      let flush = true;
+      const testSuite = suites[0];
+      for (const s of suites) {
+        if (s !== testSuite) {
+          flush = false;
+          break;
+        }
+      }
+
+      // Straight
+      let minCard = Math.min(...nums);
+      let straight = true;
+      if (minCard === 0 && nums.indexOf(12) !== -1) {
+        // Wheel with Ace as low
+        minCard = -1;
+        for (let i = minCard + 1; i < minCard + 5; i++) {
+          if (nums.indexOf(i) === -1) {
+            straight = false;
+            break;
+          }
+        }
+      } else {
+        for (let i = minCard; i < minCard + 5; i++) {
+          if (nums.indexOf(i) === -1) {
+            straight = false;
+            break;
+          }
+        }
+      }
+
+      // Repeats
+      const numsInCombo = Array.from(new Set(nums));
+      const repeats = [];
+      if (numsInCombo.length !== nums.length) {
+        for (const testN of numsInCombo) {
+          let count = 0;
+          for (let i = 0; i < 5; i++) {
+            if (nums[i] === testN) count += 1;
+          }
+          if (count !== 1) {
+            repeats.push([count, testN]);
+          }
+        }
+      }
+      repeats.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+
+      // Straight flush
+      if (straight && flush) {
+        return (8 << 20) + (minCard << 16);
+      }
+
+      // Four of a kind
+      if (repeats.length === 1 && repeats[repeats.length - 1][0] === 4) {
+        const fourVal = repeats[repeats.length - 1][1];
+        const unrep = numsInCombo.filter(x => x !== fourVal)[0];
+        return (7 << 20) + (fourVal << 16) + (unrep << 12);
+      }
+
+      // Full house
+      if (repeats.length === 2 &&
+          repeats[repeats.length - 1][0] === 3 &&
+          repeats[repeats.length - 2][0] === 2) {
+        const tripleVal = repeats[repeats.length - 1][1];
+        const pairVal = repeats[repeats.length - 2][1];
+        return (6 << 20) + (tripleVal << 16) + (pairVal << 12);
+      }
+
+      // Flush
+      if (flush) {
+        const sorted = nums.slice().sort((a, b) => a - b);
+        return (5 << 20) +
+          (sorted[4] << 16) +
+          (sorted[3] << 12) +
+          (sorted[2] << 8) +
+          (sorted[1] << 4) +
+          sorted[0];
+      }
+
+      // Straight
+      if (straight) {
+        return (4 << 20) + (minCard << 16);
+      }
+
+      // Three of a kind
+      if (repeats.length === 1 && repeats[repeats.length - 1][0] === 3) {
+        const tripleVal = repeats[repeats.length - 1][1];
+        const unrep = numsInCombo.filter(x => x !== tripleVal).sort((a, b) => a - b);
+        return (3 << 20) +
+          (tripleVal << 16) +
+          (unrep[unrep.length - 1] << 12) +
+          (unrep[unrep.length - 2] << 8);
+      }
+
+      // Two pairs
+      if (repeats.length === 2 &&
+          repeats[repeats.length - 1][0] === 2 &&
+          repeats[repeats.length - 2][0] === 2) {
+        const highPair = repeats[repeats.length - 1][1];
+        const lowPair = repeats[repeats.length - 2][1];
+        const unrep = numsInCombo.filter(x => x !== highPair && x !== lowPair)[0];
+        return (2 << 20) +
+          (highPair << 16) +
+          (lowPair << 12) +
+          (unrep << 8);
+      }
+
+      // One pair
+      if (repeats.length === 1 && repeats[repeats.length - 1][0] === 2) {
+        const pairVal = repeats[repeats.length - 1][1];
+        const unrep = numsInCombo.filter(x => x !== pairVal).sort((a, b) => a - b);
+        return (1 << 20) +
+          (pairVal << 16) +
+          (unrep[unrep.length - 1] << 12) +
+          (unrep[unrep.length - 2] << 8) +
+          (unrep[unrep.length - 3] << 4);
+      }
+
+      // High card
+      const sortedHigh = nums.slice().sort((a, b) => a - b);
+      return (sortedHigh[4] << 16) +
+             (sortedHigh[3] << 12) +
+             (sortedHigh[2] << 8) +
+             (sortedHigh[1] << 4) +
+             sortedHigh[0];
+    }
+
+    function evaluate(cards) {
+      const possibleCombos = createCombos(cards, 5);
+      let maxVal = 0;
+      for (const c of possibleCombos) {
+        const val = pointsForCards(c);
+        if (val > maxVal) maxVal = val;
+      }
+      return maxVal;
+    }
+
+    // ===== Monte Carlo game simulation =====
+    function runGame(allCards, numPlayers) {
+      let win = true;
+      const myEval = evaluate(allCards.slice(0, 7));
+      for (let i = 0; i < numPlayers - 1; i++) {
+        const oppCards = allCards.slice(2, 7).concat(allCards.slice(7 + i * 2, 9 + i * 2));
+        win = win && (myEval > evaluate(oppCards));
+      }
+      return win ? 1 : 0;
+    }
+
+    function wins(known, tSeconds, numPlayers) {
+      const remainingCards = [];
+      for (let i = 0; i < 52; i++) {
+        if (!known.includes(i)) remainingCards.push(i);
+      }
+
+      let totalW = 0;
+      let totalTrials = 0;
+      const cardsNeeded = 5 + numPlayers * 2 - known.length;
+      const start = performance.now();
+      const timeLimit = start + tSeconds * 1000;
+
+      while (performance.now() < timeLimit) {
+        // sample without replacement from remainingCards
+        const newCards = randomSample(remainingCards, cardsNeeded);
+        totalW += runGame(known.concat(newCards), numPlayers);
+        totalTrials += 1;
+      }
+      return { totalW, totalTrials };
+    }
+
+    // Random sample of k distinct elements from arr
+    function randomSample(arr, k) {
+      // Copy array indices and do partial Fisher–Yates
+      const indices = arr.map((_, idx) => idx);
+      for (let i = indices.length - 1; i > 0 && k > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [indices[i], indices[j]] = [indices[j], indices[i]];
+      }
+      const chosen = indices.slice(indices.length - k);
+      return chosen.map(i => arr[i]);
+    }
+
+    // ===== UI wiring =====
+    document.getElementById('poker-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      const errorsDiv = document.getElementById('errors');
+      const resultsDiv = document.getElementById('results');
+      errorsDiv.textContent = '';
+      resultsDiv.textContent = '';
+
+      try {
+        const numPlayers = parseInt(document.getElementById('num-players').value, 10);
+        const myCardsStr = document.getElementById('my-cards').value || '';
+        const otherCardsStr = document.getElementById('other-cards').value || '';
+        const cards = [];
+
+        // Parse hero cards
+        const myCardsTokens = myCardsStr.trim().split(/\s+/);
+        for (const tok of myCardsTokens) {
+          if (!tok) continue;
+          try {
+            cards.push(cardToInt(tok));
+          } catch (err) {
+            // ignore invalid token just like Python version
+          }
+        }
+        if (cards.length !== 2) {
+          errorsDiv.textContent = 'I need to know the two cards that you have!';
+          return;
+        }
+
+        // Parse other known cards
+        const otherTokens = otherCardsStr.trim().split(/\s+/);
+        for (const tok of otherTokens) {
+          if (!tok) continue;
+          try {
+            const card = cardToInt(tok);
+            if (!cards.includes(card)) {
+              cards.push(card);
+            }
+          } catch (err) {
+            // ignore invalid token
+          }
+        }
+
+        const cardsString = intsToCards(cards);
+        const timeAllowed = 1; // seconds
+
+        const { totalW, totalTrials } = wins(cards, timeAllowed, numPlayers);
+        if (totalTrials === 0) {
+          errorsDiv.textContent = 'Not enough time to run any trials. Try again.';
+          return;
+        }
+
+        const p = totalW / totalTrials;
+        const pPercent = (p * 100).toFixed(1);
+        const se = Math.sqrt(p * (1 - p) / totalTrials) * 100;
+        const seRounded = se.toFixed(2);
+
+        resultsDiv.textContent =
+          cardsString + ' → ' +
+          pPercent + '% ± ' + seRounded +
+          '%, from ' + totalTrials + ' trials';
+
+      } catch (err) {
+        console.error(err);
+        errorsDiv.textContent = 'Please make sure your input is valid and try again.';
+      }
+    });
+  </script>
+</body>
+</html>
